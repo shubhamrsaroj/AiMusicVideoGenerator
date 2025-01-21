@@ -90,7 +90,8 @@ function generateFramePrompt(basePrompt, index, totalFrames) {
     'masterful composition'
   ];
 
-  return `${basePrompt}, ${scenes[index] || scenes[1]}, ${enhancers.join(', ')}`;
+  const sceneType = scenes[index] || scenes[1];
+  return `${basePrompt}, ${sceneType}, ${enhancers.join(', ')}`;
 }
 
 // Function to extract keywords from prompt
@@ -113,231 +114,158 @@ const defaultSounds = [
   'soundtrack'
 ];
 
-// Add this function to handle Freesound API search and download
-async function searchAndDownloadMusic(prompt, outputPath) {
+// Function to generate music using AudioCraft
+async function generateMusicFromPrompt(prompt, duration) {
   try {
-    console.log('Searching with full prompt:', prompt);
+    console.log('Attempting to generate music with prompt:', prompt);
     
-    // First try with full prompt
-    let searchResponse = await axios.get('https://freesound.org/apiv2/search/text/', {
-      params: {
-        query: prompt,
-        token: process.env.FREE_SOUND_API_KEY,
-        fields: 'id,name,previews',
-        filter: 'duration:[1 TO 30]',
-        sort: 'rating_desc',
-        page_size: 1
+    const response = await axios({
+      method: 'post',
+      url: 'http://127.0.0.1:5001/generate-music',
+      data: { prompt, duration },
+      responseType: 'arraybuffer',
+      timeout: 600000, // Increase timeout to 10 minutes
+      headers: {
+        'Content-Type': 'application/json'
       }
     });
 
-    // If no results, try with keywords
-    if (!searchResponse.data.results || searchResponse.data.results.length === 0) {
-      const keywords = extractKeywords(prompt);
-      console.log('No results found. Trying with keywords:', keywords);
-
-      for (const keyword of keywords) {
-        searchResponse = await axios.get('https://freesound.org/apiv2/search/text/', {
-          params: {
-            query: `${keyword} music background`,
-            token: process.env.FREE_SOUND_API_KEY,
-            fields: 'id,name,previews',
-            filter: 'duration:[1 TO 30]',
-            sort: 'rating_desc',
-            page_size: 1
-          }
-        });
-
-        if (searchResponse.data.results && searchResponse.data.results.length > 0) {
-          break;
-        }
-      }
-    }
-
-    // If still no results, use DEFAULT_CATEGORIES
-    if (!searchResponse.data.results || searchResponse.data.results.length === 0) {
-      console.log('No results with keywords. Trying default categories:', DEFAULT_CATEGORIES);
-      
-      for (const category of DEFAULT_CATEGORIES) {
-        searchResponse = await axios.get('https://freesound.org/apiv2/search/text/', {
-          params: {
-            query: category,
-            token: process.env.FREE_SOUND_API_KEY,
-            fields: 'id,name,previews',
-            filter: 'duration:[1 TO 30]',
-            sort: 'rating_desc',
-            page_size: 1
-          }
-        });
-
-        if (searchResponse.data.results && searchResponse.data.results.length > 0) {
-          console.log('Found matching default category:', category);
-          break;
-        }
-      }
-    }
-
-    if (!searchResponse.data.results || searchResponse.data.results.length === 0) {
-      throw new Error('No matching sounds found after all attempts');
-    }
-
-    const sound = searchResponse.data.results[0];
-    console.log('Selected sound:', sound.name);
-
-    // Download the preview audio file
-    const downloadUrl = sound.previews['preview-hq-mp3'];
-    const audioResponse = await axios({
-      method: 'GET',
-      url: downloadUrl,
-      responseType: 'arraybuffer'
-    });
-
-    // Write the file
-    await fs.writeFile(outputPath, Buffer.from(audioResponse.data));
-    console.log(`Successfully downloaded music to ${outputPath}`);
-
-    return {
-      success: true,
-      musicPath: outputPath,
-      soundName: sound.name,
-      searchMethod: prompt === searchResponse.config.params.query ? 'direct' : 
-                   DEFAULT_CATEGORIES.includes(searchResponse.config.params.query) ? 'default' : 
-                   'keyword'
-    };
-
+    // Save the audio file
+    const outputPath = path.join(__dirname, 'temp', `music_${Date.now()}.wav`);
+    await fs.writeFile(outputPath, response.data);
+    console.log('Music saved to:', outputPath);
+    
+    return outputPath;
   } catch (error) {
-    console.error('Error in searchAndDownloadMusic:', error);
+    console.error('Music generation error:', error);
     throw error;
   }
 }
 
-// Function to generate frames using Stability API
+// Update the progress tracking
+let generationProgress = {
+  progress: 0,
+  status: '',
+  videoUrl: null,
+  error: null
+};
+
 async function generateVideoFrames(prompt, numFrames) {
   try {
+    if (!process.env.STABILITY_API_KEY) {
+      throw new Error('Missing Stability API key');
+    }
+
+    console.log('Starting frame generation:', { prompt, numFrames });
     const frames = [];
-    const minFrames = Math.max(4, numFrames); // Ensure at least 4 frames
     
-    // Create temp directory if it doesn't exist
-    const tempDir = path.join(__dirname, 'temp');
-    if (!existsSync(tempDir)) {
-      mkdirSync(tempDir, { recursive: true });
-    }
+    for (let i = 1; i <= numFrames; i++) {
+      const framePrompt = generateFramePrompt(prompt, i, numFrames);
+      console.log(`Generating frame ${i}/${numFrames}`);
 
-    for (let i = 0; i < minFrames; i++) {
-      const framePrompt = `${prompt}, scene ${i + 1}, cinematic quality, high detail`;
-      console.log(`Generating frame ${i + 1}/${minFrames} with prompt: ${framePrompt}`);
+      try {
+        const response = await axios({
+          method: 'post',
+          url: 'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.STABILITY_API_KEY}`,
+            'Accept': 'application/json'
+          },
+          data: {
+            text_prompts: [{ text: framePrompt, weight: 1 }],
+            cfg_scale: 7,
+            height: 1024,
+            width: 1024,
+            samples: 1,
+            steps: 25
+          }
+        });
 
-      const response = await axios({
-        method: 'post',
-        url: 'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image',
-        headers: {
-          'Authorization': `Bearer ${process.env.STABILITY_API_KEY}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        data: {
-          text_prompts: [{ 
-            text: framePrompt,
-            weight: 1 
-          }],
-          cfg_scale: 7,
-          height: 1024,
-          width: 1024,
-          samples: 1,
-          steps: 30,
-          seed: Math.floor(Math.random() * 1000000) + i // Different seed for each frame
+        if (!response.data?.artifacts?.[0]?.base64) {
+          throw new Error('Invalid response from Stability API');
         }
-      });
 
-      if (response.data?.artifacts?.[0]?.base64) {
-        const imagePath = path.join(tempDir, `frame_${i}.png`);
-        await fs.writeFile(imagePath, Buffer.from(response.data.artifacts[0].base64, 'base64'));
-        frames.push(imagePath);
-        console.log(`Successfully generated frame ${i + 1}`);
-        
-        // Add delay between API calls
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        const framePath = path.join(__dirname, 'temp', `frame_${Date.now()}_${i}.png`);
+        await fs.writeFile(framePath, Buffer.from(response.data.artifacts[0].base64, 'base64'));
+        frames.push(framePath);
+
+        // Update progress
+        generationProgress.status = `Generated frame ${i}/${numFrames}`;
+        generationProgress.progress = Math.round((i / numFrames) * 40);
+
+      } catch (frameError) {
+        console.error(`Error generating frame ${i}:`, frameError);
+        throw new Error(`Failed to generate frame ${i}: ${frameError.message}`);
       }
-    }
-
-    if (frames.length === 0) {
-      throw new Error('Failed to generate any frames');
     }
 
     return frames;
   } catch (error) {
-    console.error('Error generating frames:', error);
+    console.error('Frame generation failed:', error);
+    generationProgress.error = error.message;
     throw error;
   }
 }
 
 // Update the createVideo function with proper fs usage
 async function createVideo(frames, audioPath, duration) {
-  const outputPath = path.join(__dirname, 'videos', `${Date.now()}.mp4`);
-  
   return new Promise((resolve, reject) => {
-    let command = ffmpeg();
-    
-    // Add each frame with duration
-    frames.forEach((frame, index) => {
-      command = command
-        .input(frame)
-        .inputOptions([
-          '-loop', '1',
-          '-t', String(Math.ceil(duration / frames.length))
-        ]);
-    });
+    try {
+      const outputPath = path.join(__dirname, 'videos', `video_${Date.now()}.mp4`);
+      console.log('Creating video:', { frames: frames.length, audio: audioPath, output: outputPath });
 
-    // Add audio
-    if (audioPath) {
+      let command = ffmpeg()
+        .fps(24);
+
+      // Add each frame
+      frames.forEach(frame => {
+        command = command.input(frame);
+      });
+
+      // Add audio
       command = command.input(audioPath);
-    }
 
-    // Create filter complex
-    const inputs = frames.map((_, i) => `[${i}:v]scale=1024:1024,setdar=1:1,format=yuv420p[v${i}];`).join('');
-    const concatInputs = frames.map((_, i) => `[v${i}]`).join('');
-    const filter = `${inputs}${concatInputs}concat=n=${frames.length}:v=1:a=0[outv]`;
-    
-    // Add audio filter if available
-    const audioFilter = audioPath ? `;[${frames.length}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[outa]` : '';
-
-    command
-      .complexFilter(filter + audioFilter)
-      .outputOptions([
-        '-map', '[outv]',
-        ...(audioPath ? ['-map', '[outa]'] : []),
-        '-c:v', 'libx264',
-        '-preset', 'medium',
-        '-crf', '23',
-        '-movflags', '+faststart',
-        '-pix_fmt', 'yuv420p',
-        '-r', '24'
-      ])
-      .output(outputPath)
-      .on('start', commandLine => {
-        console.log('FFmpeg started:', commandLine);
-      })
-      .on('progress', progress => {
-        console.log('Processing:', progress.percent, '% done');
-      })
-      .on('end', async () => {
-        try {
-          // Use async fs.stat instead of sync version
-          const stats = await fs.stat(outputPath);
-          if (stats.size > 0) {
-            console.log('Video created successfully:', outputPath);
-            resolve(outputPath);
-          } else {
-            reject(new Error('Video file is empty'));
+      command
+        .complexFilter([
+          {
+            filter: 'concat',
+            options: {
+              n: frames.length,
+              v: 1,
+              a: 0
+            },
+            outputs: 'v'
           }
-        } catch (error) {
-          reject(new Error('Failed to verify video file: ' + error.message));
-        }
-      })
-      .on('error', (err) => {
-        console.error('FFmpeg error:', err);
-        reject(err);
-      })
-      .run();
+        ])
+        .outputOptions([
+          '-c:v', 'libx264',
+          '-preset', 'medium',
+          '-crf', '23',
+          '-c:a', 'aac',
+          '-shortest',
+          '-movflags', '+faststart',
+          '-pix_fmt', 'yuv420p'
+        ])
+        .output(outputPath)
+        .on('progress', progress => {
+          generationProgress.status = `Encoding video: ${Math.round(progress.percent)}%`;
+          generationProgress.progress = 75 + Math.round(progress.percent * 0.2);
+        })
+        .on('end', () => {
+          console.log('Video creation completed:', outputPath);
+          resolve(outputPath);
+        })
+        .on('error', (err) => {
+          console.error('Video creation error:', err);
+          reject(new Error(`Failed to create video: ${err.message}`));
+        })
+        .run();
+
+    } catch (error) {
+      console.error('Video creation failed:', error);
+      reject(error);
+    }
   });
 }
 
@@ -361,119 +289,50 @@ async function verifyFile(filePath) {
   }
 }
 
-// Update the getAudioFromFreesound function
-async function getAudioFromFreesound(prompt, duration) {
-  try {
-    // Extract keywords from prompt
-    const keywords = prompt.toLowerCase()
-      .split(/[\s.,!?]+/)
-      .filter(word => word.length > 3)
-      .filter(word => !['with', 'and', 'the', 'for'].includes(word));
-    
-    console.log('Searching with keywords:', keywords);
+// Add a new route to get progress
+app.get('/api/progress', (req, res) => {
+  res.json(generationProgress);
+});
 
-    // Try with keywords first
-    for (const keyword of keywords) {
-      const searchResponse = await axios.get('https://freesound.org/apiv2/search/text/', {
-        params: {
-          query: `${keyword} music background`,
-          token: process.env.FREE_SOUND_API_KEY,
-          fields: 'id,name,previews,duration',
-          filter: `duration:[${duration-5} TO ${duration+5}]`,
-          sort: 'rating_desc',
-          page_size: 1
-        }
-      });
-
-      if (searchResponse.data?.results?.[0]) {
-        const sound = searchResponse.data.results[0];
-        console.log(`Found sound for keyword "${keyword}":`, sound.name);
-        
-        const audioResponse = await axios({
-          method: 'get',
-          url: sound.previews['preview-hq-mp3'],
-          responseType: 'arraybuffer'
-        });
-
-        const audioPath = path.join(__dirname, 'temp', `audio_${Date.now()}.mp3`);
-        await fs.writeFile(audioPath, Buffer.from(audioResponse.data));
-        return audioPath;
-      }
-    }
-
-    // If no results with keywords, use default categories
-    console.log('No results with keywords, trying default categories...');
-    for (const category of DEFAULT_CATEGORIES) {
-      const searchResponse = await axios.get('https://freesound.org/apiv2/search/text/', {
-        params: {
-          query: category,
-          token: process.env.FREE_SOUND_API_KEY,
-          fields: 'id,name,previews,duration',
-          filter: `duration:[${duration-5} TO ${duration+5}]`,
-          sort: 'rating_desc',
-          page_size: 1
-        }
-      });
-
-      if (searchResponse.data?.results?.[0]) {
-        const sound = searchResponse.data.results[0];
-        console.log(`Found default sound from category "${category}":`, sound.name);
-        
-        const audioResponse = await axios({
-          method: 'get',
-          url: sound.previews['preview-hq-mp3'],
-          responseType: 'arraybuffer'
-        });
-
-        const audioPath = path.join(__dirname, 'temp', `audio_${Date.now()}.mp3`);
-        await fs.writeFile(audioPath, Buffer.from(audioResponse.data));
-        return audioPath;
-      }
-    }
-
-    throw new Error('No suitable audio found');
-  } catch (error) {
-    console.error('Error getting audio:', error);
-    return null;
-  }
-}
-
-// Update the route handler
+// Update your video generation route
 app.post('/api/generate-video', async (req, res) => {
   try {
     const { prompt, duration } = req.body;
     const durationNum = Number(duration);
     
     if (!prompt?.trim() || isNaN(durationNum)) {
-      return res.status(400).json({ error: 'Invalid prompt or duration' });
+      throw new Error('Invalid prompt or duration');
     }
 
-    console.log('Starting video generation...');
-    
-    // Generate frames first
+    // Reset progress
+    generationProgress = {
+      progress: 0,
+      status: 'Starting generation...',
+      videoUrl: null,
+      error: null
+    };
+
+    console.log('Starting video generation:', { prompt, duration: durationNum });
+
+    // Generate frames
+    generationProgress.status = 'Generating frames...';
     const frames = await generateVideoFrames(prompt, Math.ceil(durationNum / 2));
-    if (!frames || frames.length === 0) {
-      throw new Error('Failed to generate frames');
-    }
 
-    // Get audio
-    const audioPath = await getAudioFromFreesound(prompt, durationNum);
-    if (!audioPath) {
-      throw new Error('Failed to get audio');
-    }
+    // Generate music
+    generationProgress.status = 'Generating music...';
+    generationProgress.progress = 45;
+    const audioPath = await generateMusicFromPrompt(prompt, durationNum);
 
     // Create video
+    generationProgress.status = 'Creating final video...';
+    generationProgress.progress = 75;
     const videoPath = await createVideo(frames, audioPath, durationNum);
-    
-    // Verify video file
-    const stats = await fs.stat(videoPath);
-    if (stats.size === 0) {
-      throw new Error('Generated video file is empty');
-    }
 
+    // Save to database
+    generationProgress.status = 'Finalizing...';
+    generationProgress.progress = 90;
     const videoUrl = `/videos/${path.basename(videoPath)}`;
     
-    // Save to database
     const video = new Video({
       prompt,
       videoUrl,
@@ -483,22 +342,27 @@ app.post('/api/generate-video', async (req, res) => {
     
     await video.save();
 
-    // Clean up temp files
+    // Clean up
     await Promise.all([
       ...frames.map(frame => fs.unlink(frame).catch(console.error)),
       fs.unlink(audioPath).catch(console.error)
     ]);
 
-    res.json({
-      success: true,
-      video: {
-        ...video.toObject(),
-        fullUrl: `http://localhost:5000${videoUrl}`
-      }
-    });
+    // Complete
+    generationProgress = {
+      progress: 100,
+      status: 'Complete!',
+      videoUrl: videoUrl,
+      error: null
+    };
+
+    res.json({ success: true, videoUrl });
   } catch (error) {
     console.error('Video generation error:', error);
-    res.status(500).json({ error: error.message || 'Video generation failed' });
+    generationProgress.error = error.message;
+    generationProgress.status = 'Error occurred';
+    generationProgress.progress = -1;
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -524,23 +388,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
-
-// Freesound API configuration
-const FREESOUND_API_KEY = process.env.FREE_SOUND_API_KEY;
-const FREESOUND_CLIENT_ID = process.env.FREESOUND_CLIENT_ID;
-
-async function downloadAudio(url, outputPath) {
-  const response = await axios({
-    method: 'GET',
-    url: url,
-    responseType: 'stream'
-  });
-
-  const writer = fs.createWriteStream(outputPath);
-  response.data.pipe(writer);
-
-  return new Promise((resolve, reject) => {
-    writer.on('finish', resolve);
-    writer.on('error', reject);
-  });
-}
